@@ -981,17 +981,18 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
         fields: 'weightedFontFamily,fontSize,bold,italic,foregroundColor,backgroundColor'
       }
     });
-    // Paragraph style: add left indent to make it look like a code block
+    // Paragraph style: add left indent and tight line spacing to make it look like a single code block
     requests.push({
       updateParagraphStyle: {
         range: { startIndex: range.start, endIndex: range.end },
         paragraphStyle: {
           indentFirstLine: { magnitude: 18, unit: 'PT' },
           indentStart: { magnitude: 18, unit: 'PT' },
-          spaceAbove: { magnitude: 6, unit: 'PT' },
-          spaceBelow: { magnitude: 6, unit: 'PT' }
+          lineSpacing: 100, // 100% = single spacing, no extra space
+          spaceAbove: { magnitude: 0, unit: 'PT' },
+          spaceBelow: { magnitude: 0, unit: 'PT' }
         },
-        fields: 'indentFirstLine,indentStart,spaceAbove,spaceBelow'
+        fields: 'indentFirstLine,indentStart,lineSpacing,spaceAbove,spaceBelow'
       }
     });
   }
