@@ -705,6 +705,7 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
   const lines = markdown.split('\n');
   let inCodeBlock = false;
   let codeBlockStart = 0;
+  let codeBlockLines: string[] = [];
   let inTable = false;
   let tableRows: string[][] = [];
   let tableInsertIndex = 0;
@@ -718,18 +719,36 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
       if (!inCodeBlock) {
         inCodeBlock = true;
         codeBlockStart = currentIndex;
+        codeBlockLines = [];
         continue;
       } else {
         inCodeBlock = false;
+        // Wrap long lines at 100 chars and pad all lines to 100 chars for rectangular background
+        const CODE_WIDTH = 100;
+        const wrappedLines: string[] = [];
+        for (const codeLine of codeBlockLines) {
+          if (codeLine.length <= CODE_WIDTH) {
+            wrappedLines.push(codeLine);
+          } else {
+            // Wrap long lines
+            for (let j = 0; j < codeLine.length; j += CODE_WIDTH) {
+              wrappedLines.push(codeLine.slice(j, j + CODE_WIDTH));
+            }
+          }
+        }
+        for (const wLine of wrappedLines) {
+          const paddedLine = wLine.padEnd(CODE_WIDTH, ' ');
+          plainText += paddedLine + '\n';
+          currentIndex += paddedLine.length + 1;
+        }
         codeBlockRanges.push({ start: codeBlockStart, end: currentIndex });
         continue;
       }
     }
 
-    // If in code block, add line as-is
+    // If in code block, collect lines for later processing
     if (inCodeBlock) {
-      plainText += line + '\n';
-      currentIndex += line.length + 1;
+      codeBlockLines.push(line);
       continue;
     }
 
