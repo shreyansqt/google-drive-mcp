@@ -723,21 +723,33 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
         continue;
       } else {
         inCodeBlock = false;
-        // Wrap long lines at 80 chars (paragraph shading handles full-width background)
-        const CODE_WIDTH = 80;
+        // Wrap long lines at 80 chars, add inner padding with spaces
+        const CODE_WIDTH = 76; // 80 - 4 for padding (2 spaces each side)
+        const PAD = '  '; // 2 space indent inside the block
+
+        // Add empty line at start for top padding
+        plainText += PAD + '\n';
+        currentIndex += PAD.length + 1;
+
         for (const codeLine of codeBlockLines) {
           if (codeLine.length <= CODE_WIDTH) {
-            plainText += codeLine + '\n';
-            currentIndex += codeLine.length + 1;
+            const paddedLine = PAD + codeLine;
+            plainText += paddedLine + '\n';
+            currentIndex += paddedLine.length + 1;
           } else {
             // Wrap long lines
             for (let j = 0; j < codeLine.length; j += CODE_WIDTH) {
-              const chunk = codeLine.slice(j, j + CODE_WIDTH);
+              const chunk = PAD + codeLine.slice(j, j + CODE_WIDTH);
               plainText += chunk + '\n';
               currentIndex += chunk.length + 1;
             }
           }
         }
+
+        // Add empty line at end for bottom padding
+        plainText += PAD + '\n';
+        currentIndex += PAD.length + 1;
+
         codeBlockRanges.push({ start: codeBlockStart, end: currentIndex });
         continue;
       }
@@ -996,14 +1008,14 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
         fields: 'weightedFontFamily,fontSize,bold,italic,foregroundColor'
       }
     });
-    // Paragraph style: shading background (fills full width), indent, and tight line spacing
+    // Paragraph style: shading background (fills full width), no indent, tight line spacing
     requests.push({
       updateParagraphStyle: {
         range: { startIndex: range.start, endIndex: range.end },
         paragraphStyle: {
           shading: { backgroundColor: { color: { rgbColor: { red: 0.94, green: 0.94, blue: 0.94 } } } },
-          indentFirstLine: { magnitude: 18, unit: 'PT' },
-          indentStart: { magnitude: 18, unit: 'PT' },
+          indentFirstLine: { magnitude: 0, unit: 'PT' },
+          indentStart: { magnitude: 0, unit: 'PT' },
           lineSpacing: 100,
           spaceAbove: { magnitude: 0, unit: 'PT' },
           spaceBelow: { magnitude: 0, unit: 'PT' }
