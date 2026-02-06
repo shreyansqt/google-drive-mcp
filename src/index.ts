@@ -301,6 +301,7 @@ const CreateFolderSchema = z.object({
 
 const ListFolderSchema = z.object({
   folderId: z.string().optional(),
+  driveId: z.string().optional(),
   pageSize: z.number().int().min(1).max(100).optional(),
   pageToken: z.string().optional()
 });
@@ -325,9 +326,22 @@ const CreateGoogleDocSchema = z.object({
   parentFolderId: z.string().optional()
 });
 
+const CreateGoogleDocFromMarkdownSchema = z.object({
+  name: z.string().min(1, "Document name is required"),
+  markdown: z.string().optional(),
+  localPath: z.string().optional(),
+  parentFolderId: z.string().optional()
+}).refine(data => data.markdown || data.localPath, {
+  message: "Either markdown content or localPath must be provided"
+});
+
 const UpdateGoogleDocSchema = z.object({
   documentId: z.string().min(1, "Document ID is required"),
-  content: z.string()
+  content: z.string().optional(),
+  markdown: z.string().optional(),
+  localPath: z.string().optional()
+}).refine(data => data.content || data.markdown || data.localPath, {
+  message: "Either content, markdown, or localPath must be provided"
 });
 
 const CreateGoogleSheetSchema = z.object({
@@ -590,6 +604,287 @@ const UploadFileSchema = z.object({
 });
 
 // -----------------------------------------------------------------------------
+// MARKDOWN PARSER
+// -----------------------------------------------------------------------------
+
+// Helper to parse a markdown table row into cells
+function parseTableRow(line: string): string[] {
+  return line.split('|').slice(1, -1).map(cell => cell.trim());
+}
+
+// Check if a line is a table separator (e.g., |---|---|)
+function isTableSeparator(line: string): boolean {
+  return /^\|[\s\-:]+\|/.test(line) && line.split('|').slice(1, -1).every(cell => /^[\s\-:]+$/.test(cell));
+}
+
+// Check if a line is a table row
+function isTableRow(line: string): boolean {
+  return line.trim().startsWith('|') && line.trim().endsWith('|');
+}
+
+function parseMarkdownToDocRequests(markdown: string): { plainText: string; requests: any[] } {
+  const requests: any[] = [];
+  let plainText = '';
+  let currentIndex = 1; // Google Docs starts at index 1
+
+  // Track formatting ranges
+  const formattingRanges: { start: number; end: number; style: any }[] = [];
+  const paragraphRanges: { start: number; end: number; style: string }[] = [];
+  const codeBlockRanges: { start: number; end: number }[] = [];
+
+  // Track tables to insert after text
+  const tables: { insertIndex: number; rows: string[][]; headerRow: boolean }[] = [];
+
+  const lines = markdown.split('\n');
+  let inCodeBlock = false;
+  let codeBlockStart = 0;
+  let inTable = false;
+  let tableRows: string[][] = [];
+  let tableInsertIndex = 0;
+  let hasHeaderSeparator = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Check for code block delimiters
+    if (line.trim().startsWith('```')) {
+      if (!inCodeBlock) {
+        inCodeBlock = true;
+        codeBlockStart = currentIndex;
+        continue;
+      } else {
+        inCodeBlock = false;
+        codeBlockRanges.push({ start: codeBlockStart, end: currentIndex });
+        continue;
+      }
+    }
+
+    // If in code block, add line as-is
+    if (inCodeBlock) {
+      plainText += line + '\n';
+      currentIndex += line.length + 1;
+      continue;
+    }
+
+    // Check for table rows
+    if (isTableRow(line)) {
+      if (isTableSeparator(line)) {
+        hasHeaderSeparator = true;
+        continue;
+      }
+
+      if (!inTable) {
+        inTable = true;
+        tableRows = [];
+        tableInsertIndex = currentIndex;
+        hasHeaderSeparator = false;
+      }
+      tableRows.push(parseTableRow(line));
+      continue;
+    } else if (inTable) {
+      // End of table - save it for later insertion
+      tables.push({ insertIndex: tableInsertIndex, rows: tableRows, headerRow: hasHeaderSeparator });
+      inTable = false;
+      tableRows = [];
+    }
+
+    // Skip empty lines
+    if (line.trim() === '') continue;
+
+    const lineStart = currentIndex;
+    let processedLine = line;
+
+    // Check for headings
+    let headingStyle: string | null = null;
+    const h1Match = processedLine.match(/^# (.+)$/);
+    const h2Match = processedLine.match(/^## (.+)$/);
+    const h3Match = processedLine.match(/^### (.+)$/);
+    const h4Match = processedLine.match(/^#### (.+)$/);
+    const h5Match = processedLine.match(/^##### (.+)$/);
+    const h6Match = processedLine.match(/^###### (.+)$/);
+
+    if (h1Match) { processedLine = h1Match[1]; headingStyle = 'HEADING_1'; }
+    else if (h2Match) { processedLine = h2Match[1]; headingStyle = 'HEADING_2'; }
+    else if (h3Match) { processedLine = h3Match[1]; headingStyle = 'HEADING_3'; }
+    else if (h4Match) { processedLine = h4Match[1]; headingStyle = 'HEADING_4'; }
+    else if (h5Match) { processedLine = h5Match[1]; headingStyle = 'HEADING_5'; }
+    else if (h6Match) { processedLine = h6Match[1]; headingStyle = 'HEADING_6'; }
+
+    // Check for lists
+    const bulletMatch = processedLine.match(/^[-*+] (.+)$/);
+    const numberedMatch = processedLine.match(/^\d+\. (.+)$/);
+    let isBullet = false, isNumbered = false;
+
+    if (bulletMatch) { processedLine = bulletMatch[1]; isBullet = true; }
+    else if (numberedMatch) { processedLine = numberedMatch[1]; isNumbered = true; }
+
+    // Process inline formatting
+    let finalLine = '';
+    const lineFormats: { start: number; end: number; bold?: boolean; italic?: boolean; link?: string; code?: boolean }[] = [];
+    let remaining = processedLine;
+
+    while (remaining.length > 0) {
+      const boldMatch = remaining.match(/^\*\*(.+?)\*\*/);
+      const italicMatch = remaining.match(/^\*([^*]+?)\*/);
+      const linkMatch = remaining.match(/^\[([^\]]+)\]\(([^)]+)\)/);
+      const inlineCodeMatch = remaining.match(/^`([^`]+)`/);
+
+      if (boldMatch) {
+        const start = currentIndex + finalLine.length;
+        finalLine += boldMatch[1];
+        lineFormats.push({ start, end: start + boldMatch[1].length, bold: true });
+        remaining = remaining.slice(boldMatch[0].length);
+      } else if (inlineCodeMatch) {
+        const start = currentIndex + finalLine.length;
+        finalLine += inlineCodeMatch[1];
+        lineFormats.push({ start, end: start + inlineCodeMatch[1].length, code: true });
+        remaining = remaining.slice(inlineCodeMatch[0].length);
+      } else if (linkMatch) {
+        const start = currentIndex + finalLine.length;
+        finalLine += linkMatch[1];
+        lineFormats.push({ start, end: start + linkMatch[1].length, link: linkMatch[2] });
+        remaining = remaining.slice(linkMatch[0].length);
+      } else if (italicMatch && !remaining.startsWith('**')) {
+        const start = currentIndex + finalLine.length;
+        finalLine += italicMatch[1];
+        lineFormats.push({ start, end: start + italicMatch[1].length, italic: true });
+        remaining = remaining.slice(italicMatch[0].length);
+      } else {
+        finalLine += remaining[0];
+        remaining = remaining.slice(1);
+      }
+    }
+
+    plainText += finalLine + '\n';
+    const lineEnd = currentIndex + finalLine.length + 1;
+
+    // Store formatting
+    for (const fmt of lineFormats) {
+      if (fmt.bold) formattingRanges.push({ start: fmt.start, end: fmt.end, style: { bold: true } });
+      if (fmt.italic) formattingRanges.push({ start: fmt.start, end: fmt.end, style: { italic: true } });
+      if (fmt.link) formattingRanges.push({ start: fmt.start, end: fmt.end, style: { link: { url: fmt.link } } });
+      if (fmt.code) formattingRanges.push({ start: fmt.start, end: fmt.end, style: { code: true } });
+    }
+
+    if (headingStyle) paragraphRanges.push({ start: lineStart, end: lineEnd, style: headingStyle });
+    if (isBullet || isNumbered) paragraphRanges.push({ start: lineStart, end: lineEnd, style: isBullet ? 'BULLET' : 'NUMBERED' });
+
+    currentIndex = lineEnd;
+  }
+
+  // Handle table at end of document
+  if (inTable && tableRows.length > 0) {
+    tables.push({ insertIndex: tableInsertIndex, rows: tableRows, headerRow: hasHeaderSeparator });
+  }
+
+  if (plainText.endsWith('\n')) plainText = plainText.slice(0, -1);
+
+  // Build requests
+  requests.push({ insertText: { location: { index: 1 }, text: plainText } });
+
+  // Text formatting
+  for (const range of formattingRanges) {
+    if (range.style.bold) {
+      requests.push({ updateTextStyle: { range: { startIndex: range.start, endIndex: range.end }, textStyle: { bold: true }, fields: 'bold' } });
+    }
+    if (range.style.italic) {
+      requests.push({ updateTextStyle: { range: { startIndex: range.start, endIndex: range.end }, textStyle: { italic: true }, fields: 'italic' } });
+    }
+    if (range.style.link) {
+      requests.push({ updateTextStyle: { range: { startIndex: range.start, endIndex: range.end }, textStyle: { link: range.style.link }, fields: 'link' } });
+    }
+    if (range.style.code) {
+      requests.push({
+        updateTextStyle: {
+          range: { startIndex: range.start, endIndex: range.end },
+          textStyle: {
+            weightedFontFamily: { fontFamily: 'Courier New' },
+            backgroundColor: { color: { rgbColor: { red: 0.95, green: 0.95, blue: 0.95 } } }
+          },
+          fields: 'weightedFontFamily,backgroundColor'
+        }
+      });
+    }
+  }
+
+  // Paragraph styles
+  for (const range of paragraphRanges) {
+    if (range.style === 'BULLET' || range.style === 'NUMBERED') {
+      requests.push({ createParagraphBullets: { range: { startIndex: range.start, endIndex: range.end }, bulletPreset: range.style === 'BULLET' ? 'BULLET_DISC_CIRCLE_SQUARE' : 'NUMBERED_DECIMAL_NESTED' } });
+    } else {
+      requests.push({ updateParagraphStyle: { range: { startIndex: range.start, endIndex: range.end }, paragraphStyle: { namedStyleType: range.style }, fields: 'namedStyleType' } });
+    }
+  }
+
+  // Code block formatting
+  for (const range of codeBlockRanges) {
+    requests.push({
+      updateTextStyle: {
+        range: { startIndex: range.start, endIndex: range.end },
+        textStyle: {
+          weightedFontFamily: { fontFamily: 'Courier New' },
+          backgroundColor: { color: { rgbColor: { red: 0.95, green: 0.95, blue: 0.95 } } }
+        },
+        fields: 'weightedFontFamily,backgroundColor'
+      }
+    });
+  }
+
+  // Insert tables (process in reverse order to maintain correct indices)
+  for (const table of tables.reverse()) {
+    const numRows = table.rows.length;
+    const numCols = Math.max(...table.rows.map(row => row.length));
+
+    // Insert the table
+    requests.push({
+      insertTable: {
+        rows: numRows,
+        columns: numCols,
+        location: { index: table.insertIndex }
+      }
+    });
+
+    // Calculate cell indices and insert text
+    // Table structure: each cell has index offsets based on position
+    // After insertTable, we need to populate cells with insertText requests
+    // The table starts at insertIndex, and each cell needs text inserted
+    let cellIndex = table.insertIndex + 4; // Start after table structure overhead
+
+    for (let rowIdx = 0; rowIdx < numRows; rowIdx++) {
+      const row = table.rows[rowIdx];
+      for (let colIdx = 0; colIdx < numCols; colIdx++) {
+        const cellText = row[colIdx] || '';
+        if (cellText) {
+          requests.push({
+            insertText: {
+              location: { index: cellIndex },
+              text: cellText
+            }
+          });
+
+          // Bold the header row
+          if (rowIdx === 0 && table.headerRow) {
+            requests.push({
+              updateTextStyle: {
+                range: { startIndex: cellIndex, endIndex: cellIndex + cellText.length },
+                textStyle: { bold: true },
+                fields: 'bold'
+              }
+            });
+          }
+
+          cellIndex += cellText.length;
+        }
+        cellIndex += 2; // Cell separator overhead
+      }
+      cellIndex += 1; // Row separator overhead
+    }
+  }
+
+  return { plainText, requests };
+}
+
+// -----------------------------------------------------------------------------
 // SERVER SETUP
 // -----------------------------------------------------------------------------
 const server = new Server(
@@ -811,11 +1106,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "listFolder",
-        description: "List contents of a folder (defaults to root)",
+        description: "List contents of a folder (defaults to root). For Shared Drives, provide the driveId.",
         inputSchema: {
           type: "object",
           properties: {
             folderId: { type: "string", description: "Folder ID", optional: true },
+            driveId: { type: "string", description: "Shared Drive ID (required for Shared Drive folders)", optional: true },
             pageSize: { type: "number", description: "Items to return (default 50, max 100)", optional: true },
             pageToken: { type: "string", description: "Token for next page", optional: true }
           }
@@ -870,15 +1166,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "createGoogleDocFromMarkdown",
+        description: "Create a new Google Doc from Markdown. Provide either markdown content directly or a localPath to a .md file. Supports headings (#, ##, ###), bold (**text**), italic (*text*), links, bullet lists, and numbered lists.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Doc name" },
+            markdown: { type: "string", description: "Markdown content (provide this OR localPath)", optional: true },
+            localPath: { type: "string", description: "Path to local .md file (provide this OR markdown)", optional: true },
+            parentFolderId: { type: "string", description: "Parent folder ID", optional: true }
+          },
+          required: ["name"]
+        }
+      },
+      {
         name: "updateGoogleDoc",
-        description: "Update an existing Google Doc",
+        description: "Update an existing Google Doc. Supports plain text content, markdown, or reading from a local file.",
         inputSchema: {
           type: "object",
           properties: {
             documentId: { type: "string", description: "Doc ID" },
-            content: { type: "string", description: "New content" }
+            content: { type: "string", description: "Plain text content", optional: true },
+            markdown: { type: "string", description: "Markdown content", optional: true },
+            localPath: { type: "string", description: "Path to local .md or .txt file", optional: true }
           },
-          required: ["documentId", "content"]
+          required: ["documentId"]
         }
       },
       {
@@ -1662,16 +1974,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "listFolder": {
+        // Write debug to file for troubleshooting
+        const fs = await import('fs');
+        fs.appendFileSync('/tmp/mcp-debug.log', `\n[${new Date().toISOString()}] listFolder called with: ${JSON.stringify(request.params.arguments)}\n`);
+
         const validation = ListFolderSchema.safeParse(request.params.arguments);
         if (!validation.success) {
           return errorResponse(validation.error.errors[0].message);
         }
         const args = validation.data;
 
+        log('listFolder args received', { args, rawArgs: request.params.arguments });
+        fs.appendFileSync('/tmp/mcp-debug.log', `[${new Date().toISOString()}] Parsed args: ${JSON.stringify(args)}\n`);
+
         // Default to root if no folder specified
         const targetFolderId = args.folderId || 'root';
 
-        const res = await drive.files.list({
+        // Check if the folder is in a Shared Drive by getting its metadata
+        let detectedDriveId = args.driveId;
+        log('Checking for Shared Drive', { detectedDriveId, targetFolderId, willCheck: !detectedDriveId && targetFolderId !== 'root' });
+        if (!detectedDriveId && targetFolderId !== 'root') {
+          try {
+            log('Getting folder metadata for', { targetFolderId });
+            const folderMeta = await drive.files.get({
+              fileId: targetFolderId,
+              fields: 'driveId,name',
+              supportsAllDrives: true
+            });
+            log('Folder metadata received', { driveId: folderMeta.data.driveId, name: folderMeta.data.name });
+            if (folderMeta.data.driveId) {
+              detectedDriveId = folderMeta.data.driveId;
+              log('Auto-detected Shared Drive', { driveId: detectedDriveId });
+            }
+          } catch (e) {
+            log('Could not detect Shared Drive', { error: (e as Error).message, stack: (e as Error).stack });
+          }
+        }
+
+        // Build params for files.list
+        const listParams: any = {
           q: `'${targetFolderId}' in parents and trashed = false`,
           pageSize: Math.min(args.pageSize || 50, 100),
           pageToken: args.pageToken,
@@ -1679,6 +2020,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           orderBy: "name",
           includeItemsFromAllDrives: true,
           supportsAllDrives: true
+        };
+
+        // For Shared Drives, add corpora and driveId
+        if (detectedDriveId) {
+          listParams.corpora = 'drive';
+          listParams.driveId = detectedDriveId;
+        }
+
+        log('listFolder params', { listParams });
+
+        const res = await drive.files.list(listParams);
+
+        log('listFolder API response', {
+          filesCount: res.data.files?.length || 0,
+          hasNextPageToken: !!res.data.nextPageToken,
+          firstThreeFiles: res.data.files?.slice(0, 3).map((f: any) => f.name)
         });
 
         const files = res.data.files || [];
@@ -1687,7 +2044,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return `${isFolder ? '📁' : '📄'} ${file.name} (ID: ${file.id})`;
         }).join('\n');
 
-        let response = `Contents of folder:\n\n${formattedFiles}`;
+        let response = `Contents of folder (${files.length} items):\n\n${formattedFiles}`;
         if (res.data.nextPageToken) {
           response += `\n\nMore items available. Use pageToken: ${res.data.nextPageToken}`;
         }
@@ -1883,6 +2240,64 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "createGoogleDocFromMarkdown": {
+        const validation = CreateGoogleDocFromMarkdownSchema.safeParse(request.params.arguments);
+        if (!validation.success) {
+          return errorResponse(validation.error.errors[0].message);
+        }
+        const args = validation.data;
+
+        // Get markdown content from either direct input or file
+        let markdownContent: string;
+        if (args.localPath) {
+          if (!existsSync(args.localPath)) {
+            return errorResponse(`File not found: ${args.localPath}`);
+          }
+          markdownContent = readFileSync(args.localPath, 'utf-8');
+        } else if (args.markdown) {
+          markdownContent = args.markdown;
+        } else {
+          return errorResponse("Either markdown content or localPath must be provided");
+        }
+
+        const parentFolderId = await resolveFolderId(args.parentFolderId);
+
+        // Check if document already exists
+        const existingFileId = await checkFileExists(args.name, parentFolderId);
+        if (existingFileId) {
+          return errorResponse(
+            `A document named "${args.name}" already exists in this location. ` +
+            `To update it, use updateGoogleDoc with documentId: ${existingFileId}`
+          );
+        }
+
+        // Create empty doc
+        const docResponse = await drive.files.create({
+          requestBody: {
+            name: args.name,
+            mimeType: 'application/vnd.google-apps.document',
+            parents: [parentFolderId]
+          },
+          fields: 'id, name, webViewLink',
+          supportsAllDrives: true
+        });
+        const doc = docResponse.data;
+
+        // Parse markdown and apply formatting using shared function
+        const { requests } = parseMarkdownToDocRequests(markdownContent);
+
+        const docs = google.docs({ version: 'v1', auth: authClient });
+        await docs.documents.batchUpdate({
+          documentId: doc.id!,
+          requestBody: { requests }
+        });
+
+        return {
+          content: [{ type: "text", text: `Created Google Doc from Markdown: ${doc.name}\nID: ${doc.id}\nLink: ${doc.webViewLink}` }],
+          isError: false
+        };
+      }
+
       case "updateGoogleDoc": {
         const validation = UpdateGoogleDocSchema.safeParse(request.params.arguments);
         if (!validation.success) {
@@ -1890,15 +2305,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const args = validation.data;
 
+        // Determine content source and whether it's markdown
+        let textContent: string;
+        let isMarkdown = false;
+
+        if (args.localPath) {
+          if (!existsSync(args.localPath)) {
+            return errorResponse(`File not found: ${args.localPath}`);
+          }
+          textContent = readFileSync(args.localPath, 'utf-8');
+          isMarkdown = args.localPath.endsWith('.md');
+        } else if (args.markdown) {
+          textContent = args.markdown;
+          isMarkdown = true;
+        } else if (args.content) {
+          textContent = args.content;
+        } else {
+          return errorResponse("Either content, markdown, or localPath must be provided");
+        }
+
         const docs = google.docs({ version: 'v1', auth: authClient });
         const document = await docs.documents.get({ documentId: args.documentId });
 
         // Delete all content
-        // End index of last piece of content (body's last element, fallback to 1 if none)
         const endIndex = document.data.body?.content?.[document.data.body.content.length - 1]?.endIndex || 1;
-        
-        // Google Docs API doesn't allow deleting the final newline character
-        // We need to leave at least one character in the document
         const deleteEndIndex = Math.max(1, endIndex - 1);
 
         if (deleteEndIndex > 1) {
@@ -1914,30 +2344,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           });
         }
 
-        // Insert new content
-        await docs.documents.batchUpdate({
-          documentId: args.documentId,
-          requestBody: {
-            requests: [
-              {
-                insertText: { location: { index: 1 }, text: args.content }
-              },
-              // Ensure the text is formatted as normal text, not as a header
-              {
-                updateParagraphStyle: {
-                  range: {
-                    startIndex: 1,
-                    endIndex: args.content.length + 1
-                  },
-                  paragraphStyle: {
-                    namedStyleType: 'NORMAL_TEXT'
-                  },
-                  fields: 'namedStyleType'
-                }
-              }
-            ]
-          }
-        });
+        // Parse and insert content
+        if (isMarkdown) {
+          const { requests } = parseMarkdownToDocRequests(textContent);
+          await docs.documents.batchUpdate({ documentId: args.documentId, requestBody: { requests } });
+        } else {
+          // Plain text
+          await docs.documents.batchUpdate({
+            documentId: args.documentId,
+            requestBody: {
+              requests: [
+                { insertText: { location: { index: 1 }, text: textContent } },
+                { updateParagraphStyle: { range: { startIndex: 1, endIndex: textContent.length + 1 }, paragraphStyle: { namedStyleType: 'NORMAL_TEXT' }, fields: 'namedStyleType' } }
+              ]
+            }
+          });
+        }
 
         return {
           content: [{ type: "text", text: `Updated Google Doc: ${document.data.title}` }],
