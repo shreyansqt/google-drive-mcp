@@ -607,6 +607,51 @@ const UploadFileSchema = z.object({
 // MARKDOWN PARSER
 // -----------------------------------------------------------------------------
 
+// Helper to parse inline markdown formatting (bold, italic, code, links)
+// Returns plain text and formatting ranges relative to startIndex
+function parseInlineFormatting(text: string, startIndex: number): {
+  plainText: string;
+  formats: { start: number; end: number; bold?: boolean; italic?: boolean; link?: string; code?: boolean }[];
+} {
+  let plainText = '';
+  const formats: { start: number; end: number; bold?: boolean; italic?: boolean; link?: string; code?: boolean }[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    const boldMatch = remaining.match(/^\*\*(.+?)\*\*/);
+    const italicMatch = remaining.match(/^\*([^*]+?)\*/);
+    const linkMatch = remaining.match(/^\[([^\]]+)\]\(([^)]+)\)/);
+    const inlineCodeMatch = remaining.match(/^`([^`]+)`/);
+
+    if (boldMatch) {
+      const start = startIndex + plainText.length;
+      plainText += boldMatch[1];
+      formats.push({ start, end: start + boldMatch[1].length, bold: true });
+      remaining = remaining.slice(boldMatch[0].length);
+    } else if (inlineCodeMatch) {
+      const start = startIndex + plainText.length;
+      plainText += inlineCodeMatch[1];
+      formats.push({ start, end: start + inlineCodeMatch[1].length, code: true });
+      remaining = remaining.slice(inlineCodeMatch[0].length);
+    } else if (linkMatch) {
+      const start = startIndex + plainText.length;
+      plainText += linkMatch[1];
+      formats.push({ start, end: start + linkMatch[1].length, link: linkMatch[2] });
+      remaining = remaining.slice(linkMatch[0].length);
+    } else if (italicMatch && !remaining.startsWith('**')) {
+      const start = startIndex + plainText.length;
+      plainText += italicMatch[1];
+      formats.push({ start, end: start + italicMatch[1].length, italic: true });
+      remaining = remaining.slice(italicMatch[0].length);
+    } else {
+      plainText += remaining[0];
+      remaining = remaining.slice(1);
+    }
+  }
+
+  return { plainText, formats };
+}
+
 // Helper to parse a markdown table row into cells
 function parseTableRow(line: string): string[] {
   return line.split('|').slice(1, -1).map(cell => cell.trim());
@@ -718,42 +763,8 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
     if (bulletMatch) { processedLine = bulletMatch[1]; isBullet = true; }
     else if (numberedMatch) { processedLine = numberedMatch[1]; isNumbered = true; }
 
-    // Process inline formatting
-    let finalLine = '';
-    const lineFormats: { start: number; end: number; bold?: boolean; italic?: boolean; link?: string; code?: boolean }[] = [];
-    let remaining = processedLine;
-
-    while (remaining.length > 0) {
-      const boldMatch = remaining.match(/^\*\*(.+?)\*\*/);
-      const italicMatch = remaining.match(/^\*([^*]+?)\*/);
-      const linkMatch = remaining.match(/^\[([^\]]+)\]\(([^)]+)\)/);
-      const inlineCodeMatch = remaining.match(/^`([^`]+)`/);
-
-      if (boldMatch) {
-        const start = currentIndex + finalLine.length;
-        finalLine += boldMatch[1];
-        lineFormats.push({ start, end: start + boldMatch[1].length, bold: true });
-        remaining = remaining.slice(boldMatch[0].length);
-      } else if (inlineCodeMatch) {
-        const start = currentIndex + finalLine.length;
-        finalLine += inlineCodeMatch[1];
-        lineFormats.push({ start, end: start + inlineCodeMatch[1].length, code: true });
-        remaining = remaining.slice(inlineCodeMatch[0].length);
-      } else if (linkMatch) {
-        const start = currentIndex + finalLine.length;
-        finalLine += linkMatch[1];
-        lineFormats.push({ start, end: start + linkMatch[1].length, link: linkMatch[2] });
-        remaining = remaining.slice(linkMatch[0].length);
-      } else if (italicMatch && !remaining.startsWith('**')) {
-        const start = currentIndex + finalLine.length;
-        finalLine += italicMatch[1];
-        lineFormats.push({ start, end: start + italicMatch[1].length, italic: true });
-        remaining = remaining.slice(italicMatch[0].length);
-      } else {
-        finalLine += remaining[0];
-        remaining = remaining.slice(1);
-      }
-    }
+    // Process inline formatting using shared helper
+    const { plainText: finalLine, formats: lineFormats } = parseInlineFormatting(processedLine, currentIndex);
 
     plainText += finalLine + '\n';
     const lineEnd = currentIndex + finalLine.length + 1;
@@ -853,12 +864,24 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
     for (let rowIdx = 0; rowIdx < numRows; rowIdx++) {
       const row = table.rows[rowIdx];
       for (let colIdx = 0; colIdx < numCols; colIdx++) {
-        const cellText = row[colIdx] || '';
-        if (cellText) {
+        const rawCellText = row[colIdx] || '';
+        if (rawCellText) {
+          // Parse inline markdown formatting in cell
+          const { plainText: cellText, formats: cellFormats } = parseInlineFormatting(rawCellText, cellIndex);
+
           requests.push({
             insertText: {
               location: { index: cellIndex },
               text: cellText
+            }
+          });
+
+          // Set smaller font size (10pt) for table cells
+          requests.push({
+            updateTextStyle: {
+              range: { startIndex: cellIndex, endIndex: cellIndex + cellText.length },
+              textStyle: { fontSize: { magnitude: 10, unit: 'PT' } },
+              fields: 'fontSize'
             }
           });
 
@@ -871,6 +894,49 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
                 fields: 'bold'
               }
             });
+          }
+
+          // Apply inline formatting (bold, italic, code, links) from markdown
+          for (const fmt of cellFormats) {
+            if (fmt.bold) {
+              requests.push({
+                updateTextStyle: {
+                  range: { startIndex: fmt.start, endIndex: fmt.end },
+                  textStyle: { bold: true },
+                  fields: 'bold'
+                }
+              });
+            }
+            if (fmt.italic) {
+              requests.push({
+                updateTextStyle: {
+                  range: { startIndex: fmt.start, endIndex: fmt.end },
+                  textStyle: { italic: true },
+                  fields: 'italic'
+                }
+              });
+            }
+            if (fmt.link) {
+              requests.push({
+                updateTextStyle: {
+                  range: { startIndex: fmt.start, endIndex: fmt.end },
+                  textStyle: { link: { url: fmt.link } },
+                  fields: 'link'
+                }
+              });
+            }
+            if (fmt.code) {
+              requests.push({
+                updateTextStyle: {
+                  range: { startIndex: fmt.start, endIndex: fmt.end },
+                  textStyle: {
+                    weightedFontFamily: { fontFamily: 'Courier New' },
+                    backgroundColor: { color: { rgbColor: { red: 0.95, green: 0.95, blue: 0.95 } } }
+                  },
+                  fields: 'weightedFontFamily,backgroundColor'
+                }
+              });
+            }
           }
 
           cellIndex += cellText.length;
