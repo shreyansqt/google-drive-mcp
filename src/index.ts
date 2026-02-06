@@ -840,11 +840,11 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
         range: { startIndex: range.start, endIndex: range.end },
         textStyle: {
           weightedFontFamily: { fontFamily: 'Courier New' },
-          fontSize: { magnitude: 9, unit: 'PT' },
+          fontSize: { magnitude: 10, unit: 'PT' },
           bold: false,
           italic: false,
-          foregroundColor: { color: { rgbColor: { red: 0.2, green: 0.2, blue: 0.2 } } },
-          backgroundColor: { color: { rgbColor: { red: 0.95, green: 0.95, blue: 0.95 } } }
+          foregroundColor: { color: { rgbColor: { red: 0.1, green: 0.1, blue: 0.1 } } },
+          backgroundColor: { color: { rgbColor: { red: 0.94, green: 0.94, blue: 0.94 } } }
         },
         fields: 'weightedFontFamily,fontSize,bold,italic,foregroundColor,backgroundColor'
       }
@@ -870,11 +870,12 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
     const numCols = Math.max(...table.rows.map(row => row.length));
 
     // Reduce spacing on the paragraph before the table
-    if (table.precedingParagraphEnd > 1) {
+    // Target the paragraph ending just before the table insert position
+    if (table.insertIndex > 1) {
       requests.push({
         updateParagraphStyle: {
-          range: { startIndex: table.precedingParagraphEnd, endIndex: table.insertIndex },
-          paragraphStyle: { spaceBelow: { magnitude: 0, unit: 'PT' } },
+          range: { startIndex: table.insertIndex - 1, endIndex: table.insertIndex },
+          paragraphStyle: { spaceBelow: { magnitude: 4, unit: 'PT' } },
           fields: 'spaceBelow'
         }
       });
