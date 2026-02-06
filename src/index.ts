@@ -607,14 +607,14 @@ const UploadFileSchema = z.object({
 // MARKDOWN PARSER
 // -----------------------------------------------------------------------------
 
-// Helper to parse inline markdown formatting (bold, italic, code, links)
+// Helper to parse inline markdown formatting (bold, italic, code, links, strikethrough, sub/superscript)
 // Returns plain text and formatting ranges relative to startIndex
 function parseInlineFormatting(text: string, startIndex: number): {
   plainText: string;
-  formats: { start: number; end: number; bold?: boolean; italic?: boolean; link?: string; code?: boolean }[];
+  formats: { start: number; end: number; bold?: boolean; italic?: boolean; link?: string; code?: boolean; strikethrough?: boolean; subscript?: boolean; superscript?: boolean }[];
 } {
   let plainText = '';
-  const formats: { start: number; end: number; bold?: boolean; italic?: boolean; link?: string; code?: boolean }[] = [];
+  const formats: { start: number; end: number; bold?: boolean; italic?: boolean; link?: string; code?: boolean; strikethrough?: boolean; subscript?: boolean; superscript?: boolean }[] = [];
   let remaining = text;
 
   while (remaining.length > 0) {
@@ -622,12 +622,20 @@ function parseInlineFormatting(text: string, startIndex: number): {
     const italicMatch = remaining.match(/^\*([^*]+?)\*/);
     const linkMatch = remaining.match(/^\[([^\]]+)\]\(([^)]+)\)/);
     const inlineCodeMatch = remaining.match(/^`([^`]+)`/);
+    const strikethroughMatch = remaining.match(/^~~(.+?)~~/);
+    const subscriptMatch = remaining.match(/^~([^~]+)~/);
+    const superscriptMatch = remaining.match(/^\^([^^]+)\^/);
 
     if (boldMatch) {
       const start = startIndex + plainText.length;
       plainText += boldMatch[1];
       formats.push({ start, end: start + boldMatch[1].length, bold: true });
       remaining = remaining.slice(boldMatch[0].length);
+    } else if (strikethroughMatch) {
+      const start = startIndex + plainText.length;
+      plainText += strikethroughMatch[1];
+      formats.push({ start, end: start + strikethroughMatch[1].length, strikethrough: true });
+      remaining = remaining.slice(strikethroughMatch[0].length);
     } else if (inlineCodeMatch) {
       const start = startIndex + plainText.length;
       plainText += inlineCodeMatch[1];
@@ -638,6 +646,16 @@ function parseInlineFormatting(text: string, startIndex: number): {
       plainText += linkMatch[1];
       formats.push({ start, end: start + linkMatch[1].length, link: linkMatch[2] });
       remaining = remaining.slice(linkMatch[0].length);
+    } else if (superscriptMatch) {
+      const start = startIndex + plainText.length;
+      plainText += superscriptMatch[1];
+      formats.push({ start, end: start + superscriptMatch[1].length, superscript: true });
+      remaining = remaining.slice(superscriptMatch[0].length);
+    } else if (subscriptMatch) {
+      const start = startIndex + plainText.length;
+      plainText += subscriptMatch[1];
+      formats.push({ start, end: start + subscriptMatch[1].length, subscript: true });
+      remaining = remaining.slice(subscriptMatch[0].length);
     } else if (italicMatch && !remaining.startsWith('**')) {
       const start = startIndex + plainText.length;
       plainText += italicMatch[1];
@@ -674,9 +692,11 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
 
   // Track formatting ranges
   const formattingRanges: { start: number; end: number; style: any }[] = [];
-  const paragraphRanges: { start: number; end: number; style: string }[] = [];
+  const paragraphRanges: { start: number; end: number; style: string; nestingLevel?: number }[] = [];
   const codeBlockRanges: { start: number; end: number }[] = [];
   const horizontalRules: number[] = []; // Indices where horizontal rules should be inserted
+  const blockquoteRanges: { start: number; end: number }[] = []; // Blockquote paragraphs
+  const strikethroughRanges: { start: number; end: number }[] = []; // For checked task items
 
   // Track tables to insert after text
   // precedingParagraphEnd tracks where the paragraph before the table ends (for spacing adjustment)
@@ -767,13 +787,42 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
     else if (h5Match) { processedLine = h5Match[1]; headingStyle = 'HEADING_5'; }
     else if (h6Match) { processedLine = h6Match[1]; headingStyle = 'HEADING_6'; }
 
-    // Check for lists
-    const bulletMatch = processedLine.match(/^[-*+] (.+)$/);
-    const numberedMatch = processedLine.match(/^\d+\. (.+)$/);
+    // Check for blockquotes
+    let isBlockquote = false;
+    const blockquoteMatch = processedLine.match(/^>\s*(.*)$/);
+    if (blockquoteMatch) {
+      processedLine = blockquoteMatch[1];
+      isBlockquote = true;
+    }
+
+    // Check for task lists (checkboxes)
+    let isTaskList = false;
+    let isTaskChecked = false;
+    const taskUncheckedMatch = processedLine.match(/^[-*+]\s*\[\s*\]\s*(.+)$/);
+    const taskCheckedMatch = processedLine.match(/^[-*+]\s*\[[xX]\]\s*(.+)$/);
+    if (taskCheckedMatch) {
+      processedLine = '☑ ' + taskCheckedMatch[1];
+      isTaskList = true;
+      isTaskChecked = true;
+    } else if (taskUncheckedMatch) {
+      processedLine = '☐ ' + taskUncheckedMatch[1];
+      isTaskList = true;
+    }
+
+    // Check for lists (with nesting support via leading spaces/tabs)
+    let nestingLevel = 0;
+    const leadingSpaces = line.match(/^(\s*)/);
+    if (leadingSpaces && leadingSpaces[1]) {
+      // Count indentation: 2 spaces or 1 tab = 1 level
+      nestingLevel = Math.floor(leadingSpaces[1].replace(/\t/g, '  ').length / 2);
+    }
+
+    const bulletMatch = processedLine.match(/^[-*+]\s+(.+)$/);
+    const numberedMatch = processedLine.match(/^\d+\.\s+(.+)$/);
     let isBullet = false, isNumbered = false;
 
-    if (bulletMatch) { processedLine = bulletMatch[1]; isBullet = true; }
-    else if (numberedMatch) { processedLine = numberedMatch[1]; isNumbered = true; }
+    if (!isTaskList && bulletMatch) { processedLine = bulletMatch[1]; isBullet = true; }
+    else if (!isTaskList && numberedMatch) { processedLine = numberedMatch[1]; isNumbered = true; }
 
     // Process inline formatting using shared helper
     const { plainText: finalLine, formats: lineFormats } = parseInlineFormatting(processedLine, currentIndex);
@@ -787,10 +836,19 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
       if (fmt.italic) formattingRanges.push({ start: fmt.start, end: fmt.end, style: { italic: true } });
       if (fmt.link) formattingRanges.push({ start: fmt.start, end: fmt.end, style: { link: { url: fmt.link } } });
       if (fmt.code) formattingRanges.push({ start: fmt.start, end: fmt.end, style: { code: true } });
+      if (fmt.strikethrough) formattingRanges.push({ start: fmt.start, end: fmt.end, style: { strikethrough: true } });
+      if (fmt.subscript) formattingRanges.push({ start: fmt.start, end: fmt.end, style: { subscript: true } });
+      if (fmt.superscript) formattingRanges.push({ start: fmt.start, end: fmt.end, style: { superscript: true } });
     }
 
     if (headingStyle) paragraphRanges.push({ start: lineStart, end: lineEnd, style: headingStyle });
-    if (isBullet || isNumbered) paragraphRanges.push({ start: lineStart, end: lineEnd, style: isBullet ? 'BULLET' : 'NUMBERED' });
+    if (isBullet || isNumbered) paragraphRanges.push({ start: lineStart, end: lineEnd, style: isBullet ? 'BULLET' : 'NUMBERED', nestingLevel });
+    if (isBlockquote) blockquoteRanges.push({ start: lineStart, end: lineEnd });
+    if (isTaskChecked) {
+      // Strike through the text after the checkbox for completed tasks
+      const checkboxLen = 2; // "☑ " length
+      strikethroughRanges.push({ start: lineStart + checkboxLen, end: lineEnd - 1 });
+    }
 
     currentIndex = lineEnd;
   }
@@ -830,15 +888,79 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
         }
       });
     }
+    if (range.style.strikethrough) {
+      requests.push({ updateTextStyle: { range: { startIndex: range.start, endIndex: range.end }, textStyle: { strikethrough: true }, fields: 'strikethrough' } });
+    }
+    if (range.style.subscript) {
+      requests.push({ updateTextStyle: { range: { startIndex: range.start, endIndex: range.end }, textStyle: { baselineOffset: 'SUBSCRIPT' }, fields: 'baselineOffset' } });
+    }
+    if (range.style.superscript) {
+      requests.push({ updateTextStyle: { range: { startIndex: range.start, endIndex: range.end }, textStyle: { baselineOffset: 'SUPERSCRIPT' }, fields: 'baselineOffset' } });
+    }
   }
 
   // Paragraph styles
   for (const range of paragraphRanges) {
     if (range.style === 'BULLET' || range.style === 'NUMBERED') {
       requests.push({ createParagraphBullets: { range: { startIndex: range.start, endIndex: range.end }, bulletPreset: range.style === 'BULLET' ? 'BULLET_DISC_CIRCLE_SQUARE' : 'NUMBERED_DECIMAL_NESTED' } });
+      // Apply indentation for nested lists
+      if (range.nestingLevel && range.nestingLevel > 0) {
+        const indent = range.nestingLevel * 36; // 36pt per nesting level
+        requests.push({
+          updateParagraphStyle: {
+            range: { startIndex: range.start, endIndex: range.end },
+            paragraphStyle: {
+              indentStart: { magnitude: indent, unit: 'PT' },
+              indentFirstLine: { magnitude: indent, unit: 'PT' }
+            },
+            fields: 'indentStart,indentFirstLine'
+          }
+        });
+      }
     } else {
       requests.push({ updateParagraphStyle: { range: { startIndex: range.start, endIndex: range.end }, paragraphStyle: { namedStyleType: range.style }, fields: 'namedStyleType' } });
     }
+  }
+
+  // Blockquote styling - indent with left border effect
+  for (const range of blockquoteRanges) {
+    requests.push({
+      updateParagraphStyle: {
+        range: { startIndex: range.start, endIndex: range.end },
+        paragraphStyle: {
+          indentStart: { magnitude: 24, unit: 'PT' },
+          indentFirstLine: { magnitude: 24, unit: 'PT' },
+          borderLeft: {
+            color: { color: { rgbColor: { red: 0.8, green: 0.8, blue: 0.8 } } },
+            width: { magnitude: 3, unit: 'PT' },
+            padding: { magnitude: 12, unit: 'PT' },
+            dashStyle: 'SOLID'
+          }
+        },
+        fields: 'indentStart,indentFirstLine,borderLeft'
+      }
+    });
+    // Make blockquote text slightly gray
+    requests.push({
+      updateTextStyle: {
+        range: { startIndex: range.start, endIndex: range.end },
+        textStyle: {
+          foregroundColor: { color: { rgbColor: { red: 0.4, green: 0.4, blue: 0.4 } } }
+        },
+        fields: 'foregroundColor'
+      }
+    });
+  }
+
+  // Strikethrough for completed task items
+  for (const range of strikethroughRanges) {
+    requests.push({
+      updateTextStyle: {
+        range: { startIndex: range.start, endIndex: range.end },
+        textStyle: { strikethrough: true },
+        fields: 'strikethrough'
+      }
+    });
   }
 
   // Code block formatting - style as code with monospace font, smaller size, background, and indentation
