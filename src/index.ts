@@ -676,6 +676,7 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
   const formattingRanges: { start: number; end: number; style: any }[] = [];
   const paragraphRanges: { start: number; end: number; style: string }[] = [];
   const codeBlockRanges: { start: number; end: number }[] = [];
+  const horizontalRules: number[] = []; // Indices where horizontal rules should be inserted
 
   // Track tables to insert after text
   // precedingParagraphEnd tracks where the paragraph before the table ends (for spacing adjustment)
@@ -737,6 +738,15 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
 
     // Skip empty lines
     if (line.trim() === '') continue;
+
+    // Check for horizontal rule (---, ***, ___)
+    if (/^[-*_]{3,}\s*$/.test(line.trim())) {
+      // Add a placeholder that we'll replace with a horizontal line
+      plainText += '\n';
+      horizontalRules.push(currentIndex);
+      currentIndex += 1;
+      continue;
+    }
 
     const lineStart = currentIndex;
     let processedLine = line;
@@ -860,6 +870,26 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
           spaceBelow: { magnitude: 6, unit: 'PT' }
         },
         fields: 'indentFirstLine,indentStart,spaceAbove,spaceBelow'
+      }
+    });
+  }
+
+  // Horizontal rules - style as paragraph with bottom border
+  for (const idx of horizontalRules) {
+    requests.push({
+      updateParagraphStyle: {
+        range: { startIndex: idx, endIndex: idx + 1 },
+        paragraphStyle: {
+          borderBottom: {
+            color: { color: { rgbColor: { red: 0.8, green: 0.8, blue: 0.8 } } },
+            width: { magnitude: 1, unit: 'PT' },
+            padding: { magnitude: 6, unit: 'PT' },
+            dashStyle: 'SOLID'
+          },
+          spaceAbove: { magnitude: 12, unit: 'PT' },
+          spaceBelow: { magnitude: 12, unit: 'PT' }
+        },
+        fields: 'borderBottom,spaceAbove,spaceBelow'
       }
     });
   }
