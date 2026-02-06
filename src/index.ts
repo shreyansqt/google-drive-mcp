@@ -678,7 +678,8 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
   const codeBlockRanges: { start: number; end: number }[] = [];
 
   // Track tables to insert after text
-  const tables: { insertIndex: number; rows: string[][]; headerRow: boolean }[] = [];
+  // precedingParagraphEnd tracks where the paragraph before the table ends (for spacing adjustment)
+  const tables: { insertIndex: number; rows: string[][]; headerRow: boolean; precedingParagraphEnd: number }[] = [];
 
   const lines = markdown.split('\n');
   let inCodeBlock = false;
@@ -728,7 +729,8 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
       continue;
     } else if (inTable) {
       // End of table - save it for later insertion
-      tables.push({ insertIndex: tableInsertIndex, rows: tableRows, headerRow: hasHeaderSeparator });
+      // precedingParagraphEnd is one less than insert index (the newline before)
+      tables.push({ insertIndex: tableInsertIndex, rows: tableRows, headerRow: hasHeaderSeparator, precedingParagraphEnd: Math.max(1, tableInsertIndex - 1) });
       inTable = false;
       tableRows = [];
     }
@@ -785,7 +787,7 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
 
   // Handle table at end of document
   if (inTable && tableRows.length > 0) {
-    tables.push({ insertIndex: tableInsertIndex, rows: tableRows, headerRow: hasHeaderSeparator });
+    tables.push({ insertIndex: tableInsertIndex, rows: tableRows, headerRow: hasHeaderSeparator, precedingParagraphEnd: Math.max(1, tableInsertIndex - 1) });
   }
 
   if (plainText.endsWith('\n')) plainText = plainText.slice(0, -1);
@@ -810,9 +812,11 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
           range: { startIndex: range.start, endIndex: range.end },
           textStyle: {
             weightedFontFamily: { fontFamily: 'Courier New' },
+            bold: false,
+            italic: false,
             backgroundColor: { color: { rgbColor: { red: 0.95, green: 0.95, blue: 0.95 } } }
           },
-          fields: 'weightedFontFamily,backgroundColor'
+          fields: 'weightedFontFamily,bold,italic,backgroundColor'
         }
       });
     }
@@ -827,16 +831,35 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
     }
   }
 
-  // Code block formatting
+  // Code block formatting - style as code with monospace font, smaller size, background, and indentation
   for (const range of codeBlockRanges) {
+    // Text style: monospace font, smaller size, dark text on light gray background
+    // Explicitly set bold/italic to false to prevent any inherited styles
     requests.push({
       updateTextStyle: {
         range: { startIndex: range.start, endIndex: range.end },
         textStyle: {
           weightedFontFamily: { fontFamily: 'Courier New' },
+          fontSize: { magnitude: 9, unit: 'PT' },
+          bold: false,
+          italic: false,
+          foregroundColor: { color: { rgbColor: { red: 0.2, green: 0.2, blue: 0.2 } } },
           backgroundColor: { color: { rgbColor: { red: 0.95, green: 0.95, blue: 0.95 } } }
         },
-        fields: 'weightedFontFamily,backgroundColor'
+        fields: 'weightedFontFamily,fontSize,bold,italic,foregroundColor,backgroundColor'
+      }
+    });
+    // Paragraph style: add left indent to make it look like a code block
+    requests.push({
+      updateParagraphStyle: {
+        range: { startIndex: range.start, endIndex: range.end },
+        paragraphStyle: {
+          indentFirstLine: { magnitude: 18, unit: 'PT' },
+          indentStart: { magnitude: 18, unit: 'PT' },
+          spaceAbove: { magnitude: 6, unit: 'PT' },
+          spaceBelow: { magnitude: 6, unit: 'PT' }
+        },
+        fields: 'indentFirstLine,indentStart,spaceAbove,spaceBelow'
       }
     });
   }
@@ -845,6 +868,17 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
   for (const table of tables.reverse()) {
     const numRows = table.rows.length;
     const numCols = Math.max(...table.rows.map(row => row.length));
+
+    // Reduce spacing on the paragraph before the table
+    if (table.precedingParagraphEnd > 1) {
+      requests.push({
+        updateParagraphStyle: {
+          range: { startIndex: table.precedingParagraphEnd, endIndex: table.insertIndex },
+          paragraphStyle: { spaceBelow: { magnitude: 0, unit: 'PT' } },
+          fields: 'spaceBelow'
+        }
+      });
+    }
 
     // Insert the table
     requests.push({
