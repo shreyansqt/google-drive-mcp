@@ -723,23 +723,20 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
         continue;
       } else {
         inCodeBlock = false;
-        // Wrap long lines at 100 chars and pad all lines to 100 chars for rectangular background
-        const CODE_WIDTH = 100;
-        const wrappedLines: string[] = [];
+        // Wrap long lines at 80 chars (paragraph shading handles full-width background)
+        const CODE_WIDTH = 80;
         for (const codeLine of codeBlockLines) {
           if (codeLine.length <= CODE_WIDTH) {
-            wrappedLines.push(codeLine);
+            plainText += codeLine + '\n';
+            currentIndex += codeLine.length + 1;
           } else {
             // Wrap long lines
             for (let j = 0; j < codeLine.length; j += CODE_WIDTH) {
-              wrappedLines.push(codeLine.slice(j, j + CODE_WIDTH));
+              const chunk = codeLine.slice(j, j + CODE_WIDTH);
+              plainText += chunk + '\n';
+              currentIndex += chunk.length + 1;
             }
           }
-        }
-        for (const wLine of wrappedLines) {
-          const paddedLine = wLine.padEnd(CODE_WIDTH, ' ');
-          plainText += paddedLine + '\n';
-          currentIndex += paddedLine.length + 1;
         }
         codeBlockRanges.push({ start: codeBlockStart, end: currentIndex });
         continue;
@@ -982,9 +979,9 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
     });
   }
 
-  // Code block formatting - style as code with monospace font, smaller size, background, and indentation
+  // Code block formatting - style as code with monospace font, smaller size, and paragraph shading
   for (const range of codeBlockRanges) {
-    // Text style: monospace font, smaller size, dark text on light gray background
+    // Text style: monospace font, smaller size, dark text
     // Explicitly set bold/italic to false to prevent any inherited styles
     requests.push({
       updateTextStyle: {
@@ -994,24 +991,24 @@ function parseMarkdownToDocRequests(markdown: string): { plainText: string; requ
           fontSize: { magnitude: 10, unit: 'PT' },
           bold: false,
           italic: false,
-          foregroundColor: { color: { rgbColor: { red: 0.1, green: 0.1, blue: 0.1 } } },
-          backgroundColor: { color: { rgbColor: { red: 0.94, green: 0.94, blue: 0.94 } } }
+          foregroundColor: { color: { rgbColor: { red: 0.1, green: 0.1, blue: 0.1 } } }
         },
-        fields: 'weightedFontFamily,fontSize,bold,italic,foregroundColor,backgroundColor'
+        fields: 'weightedFontFamily,fontSize,bold,italic,foregroundColor'
       }
     });
-    // Paragraph style: add left indent and tight line spacing to make it look like a single code block
+    // Paragraph style: shading background (fills full width), indent, and tight line spacing
     requests.push({
       updateParagraphStyle: {
         range: { startIndex: range.start, endIndex: range.end },
         paragraphStyle: {
+          shading: { backgroundColor: { color: { rgbColor: { red: 0.94, green: 0.94, blue: 0.94 } } } },
           indentFirstLine: { magnitude: 18, unit: 'PT' },
           indentStart: { magnitude: 18, unit: 'PT' },
-          lineSpacing: 100, // 100% = single spacing, no extra space
+          lineSpacing: 100,
           spaceAbove: { magnitude: 0, unit: 'PT' },
           spaceBelow: { magnitude: 0, unit: 'PT' }
         },
-        fields: 'indentFirstLine,indentStart,lineSpacing,spaceAbove,spaceBelow'
+        fields: 'shading.backgroundColor,indentFirstLine,indentStart,lineSpacing,spaceAbove,spaceBelow'
       }
     });
   }
